@@ -1,43 +1,70 @@
-
 import struct
+
+
 def parse_dns_query(data):
+    """
+    Parse a raw DNS UDP query packet.
+    Returns dict: id, flags, domain (no trailing dot), qtype, qclass
+    """
     transaction_id = data[:2]
-    flags = data[2:4]
-    qdcount = struct.unpack(">H", data[4:6])[0]
-    domain = ""
-    i = 12
+    flags          = data[2:4]
+
+    labels = []
+    i = 12  # DNS header is always 12 bytes
+
     while True:
         length = data[i]
         if length == 0:
             break
-        domain += data[i+1:i+1+length].decode() + "."
-        i += length + 1
-    qtype = data[i+1:i+3]
+        labels.append(data[i + 1 : i + 1 + length].decode(errors="replace"))
+        i += 1 + length
+
+    # i points at the 0x00 null terminator
+    qtype  = data[i + 1 : i + 3]   # 2 bytes
+    qclass = data[i + 3 : i + 5]   # 2 bytes
+
     return {
-        "id": transaction_id,
-        "flags": flags,
-        "domain": domain,
-        "qtype": qtype,
-        "question_end": i + 5
+        "id":     transaction_id,
+        "flags":  flags,
+        "domain": ".".join(labels),  # e.g. "example.com" — no trailing dot
+        "qtype":  qtype,
+        "qclass": qclass,
     }
+
+
 def build_response(query, ip):
-    transaction_id = query["id"]
-    flags = b"\x81\x80"  # standard response, no error
-    qdcount = b"\x00\x01"
-    ancount = b"\x00\x01"
-    nscount = b"\x00\x00"
-    arcount = b"\x00\x00"
-    header = transaction_id + flags + qdcount + ancount + nscount + arcount
-    question = b''
+    """
+    Build a DNS A-record response packet.
+    query: dict from parse_dns_query
+    ip:    IPv4 string e.g. "1.2.3.4"
+    """
+    # Header
+    header = (
+        query["id"]    +
+        b"\x81\x80"    +   # QR=1 response, RD=1, RA=1, RCODE=0 no error
+        b"\x00\x01"    +   # QDCOUNT = 1
+        b"\x00\x01"    +   # ANCOUNT = 1
+        b"\x00\x00"    +   # NSCOUNT = 0
+        b"\x00\x00"        # ARCOUNT = 0
+    )
+
+    # Question section — rebuild QNAME from domain string
+    qname = b""
     for part in query["domain"].split("."):
         if part:
-            question += bytes([len(part)]) + part.encode()
-    question += b"\x00" + query["qtype"] + b"\x00\x01"
-    answer = b"\xc0\x0c"  # pointer to domain
-    answer += b"\x00\x01"  # type A
-    answer += b"\x00\x01"  # class IN
-    answer += b"\x00\x00\x00\x3c"  # TTL
-    answer += b"\x00\x04"  # data length
+            qname += bytes([len(part)]) + part.encode()
+    qname += b"\x00"  # root null terminator
 
-    answer += bytes(map(int, ip.split(".")))
+    question = qname + query["qtype"] + b"\x00\x01"  # QCLASS = IN
+
+    # Answer section
+    answer = (
+        b"\xc0\x0c"        +   # pointer to QNAME at offset 12
+        b"\x00\x01"        +   # TYPE  = A
+        b"\x00\x01"        +   # CLASS = IN
+        b"\x00\x00\x00\x3c" +  # TTL   = 60 seconds
+        b"\x00\x04"        +   # RDLENGTH = 4 bytes
+        bytes(map(int, ip.split(".")))  # RDATA = IPv4
+    )
+
     return header + question + answer
